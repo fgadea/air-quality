@@ -1,53 +1,202 @@
 #include "Arduino.h"
 #include "Wire.h"
-#include "U8x8lib.h"  //name=U8g2 version=2.33.15 author=oliver <olikraus@gmail.com> url=https://github.com/olikraus/u8g2
-#include "DHT.h"      //name=Grove Temperature And Humidity Sensor version=2.0.1 author=Seeed Studio url=https://github.com/Seeed-Studio/Grove_Temperature_And_Humidity_Sensor
-#define DHTTYPE DHT20 // DHT 20 *Notice: The DHT10 and DHT20 is different from other DHT* sensor ,it uses i2c interface rather than one wire So it doesn't require a pin
-DHT dht(DHTTYPE);     // DHT10 DHT20 don't need to define Pin`
-// U8X8_SSD1306_128X64_NONAME_SW_I2C Oled(/* clock=*/ SCL, /* data=*/ SDA, /* reset=*/ U8X8_PIN_NONE); // POUR OLED SEUL
-U8X8_SSD1306_128X64_NONAME_HW_I2C Oled(/* reset=*/U8X8_PIN_NONE); // POUR OLED ET AUTRE MODULE I2C (https://forum.seeedstudio.com/t/i2c-module-problems-with-grove-beginner-kit-for-arduino/252416/22)
-void setup()
+
+#include "U8x8lib.h"
+U8X8_SSD1306_128X64_NONAME_HW_I2C Oled(U8X8_PIN_NONE);
+
+#include "DHT.h"
+#define DHTTYPE DHT20 // DHT 20
+DHT dht(DHTTYPE);
+
+#define LIGHT_SENSOR A3
+#define BUTTON 4
+#define LED 6
+#define SPEAKER 5
+#define POTENCIOMETER A0
+
+//-----------------
+// Structures
+enum State
 {
-  Oled.setBusClock(100000); // https://forum.seeedstudio.com/t/i2c-module-problems-with-grove-beginner-kit-for-arduino/252416/28
-  Oled.begin();
-  Oled.setFlipMode(true);
-  // Oled.setFont(u8x8_font_amstrad_cpc_extended_r); Oled.drawString(0, 0, "Setup");
-  // Oled.setFont(u8x8_font_chroma48medium8_r); Oled.setCursor(0, 0); Oled.print("Setup");
-  Serial.begin(115200);
-  Serial.println(__FILE__);
-  Serial.println("DHT20 test!");
-  Wire.begin();
-  dht.begin();
+  temperature,
+  humidity,
+  light
+};
+struct hdtData
+{
+  bool hasData;
+  float humidity;
+  float temperature;
+};
+//-----------------
+
+//-----------------
+// Global variables
+State onState = temperature;
+int buttonState = 0;
+unsigned long timerCount = 0;
+unsigned long oldTime = 0;
+//-----------------
+
+//-----------------
+// Complementary functions
+void printTemperature(hdtData data)
+{
+  Oled.setCursor(0, 0);
+  Oled.print("Temp: ");
+  Oled.setCursor(0, 4);
+  Oled.print(data.temperature);
+  Oled.print("\x00b0");
+  Oled.print("C");
 }
-void loop()
+
+void printHumidity(hdtData data)
 {
-  Oled.setFont(u8x8_font_amstrad_cpc_extended_r); // Oled.drawString(0, 1, "Loop");
-  // Oled.setFont(u8x8_font_chroma48medium8_r); Oled.setCursor(0, 1); Oled.print("Loop");
-  float temp_hum_val[2] = {0}; // Reading temperature or humidity takes about 250 milliseconds! Sensor readings may also be up to 2 seconds 'old' (its a very slow sensor)
+  Oled.setCursor(0, 0);
+  Oled.print("Humid: ");
+  Oled.setCursor(0, 4);
+  Oled.print(data.humidity);
+  Oled.print("%  ");
+}
+
+void printLight()
+{
+  digitalWrite(LED, HIGH);
+  int lightSensorValue = analogRead(A3);
+  int normalizedLight = map(lightSensorValue, 0, 1023, 0, 100);
+  Oled.setCursor(0, 0);
+  Oled.print("Light: ");
+  Oled.setCursor(0, 4);
+  Oled.print(normalizedLight);
+  Oled.print("%     ");
+}
+
+hdtData getHdt()
+{
+  digitalWrite(LED, HIGH);
+  struct hdtData data = hdtData();
+  float temp_hum_val[2] = {0};
   if (!dht.readTempAndHumidity(temp_hum_val))
   {
-    float myHumidity = temp_hum_val[0];
-    float myTemperature = temp_hum_val[1];
-    Serial.print("Humidity: ");
-    Serial.print(myHumidity);
-    Serial.print(" %\t");
-    Serial.print("Temperature: ");
-    Serial.print(myTemperature);
-    Serial.println(" *C");
-    Oled.setCursor(0, 0);
-    Oled.print("Temperature");
-    Oled.setCursor(0, 1);
-    Oled.print(myTemperature);
-    Oled.print(" °C");
-    Oled.setCursor(0, 3);
-    Oled.print("Humidite");
-    Oled.setCursor(0, 4);
-    Oled.print(myHumidity);
-    Oled.print(" %");
+    data.humidity = temp_hum_val[0];
+    data.temperature = temp_hum_val[1];
+    data.hasData = true;
   }
   else
   {
-    Serial.println("Failed to get temprature and humidity value.");
+    data.hasData = false;
   }
-  delay(1500);
+  return data;
 }
+
+void checkButton()
+{
+  int prevState = buttonState;
+  int newButtonState = digitalRead(BUTTON);
+
+  // Prevent multiples taps at time
+  if (prevState != newButtonState)
+  {
+    buttonState = newButtonState;
+    digitalWrite(LED, HIGH);
+  }
+  else
+  {
+    return;
+  }
+
+  // Change state
+  if (buttonState == HIGH)
+  {
+    switch (onState)
+    {
+    case temperature:
+      onState = humidity;
+      break;
+    case humidity:
+      onState = light;
+      break;
+    case light:
+      onState = temperature;
+      break;
+    default:
+      break;
+    }
+    timerCount = 0;
+  }
+}
+
+unsigned long getDeltatime()
+{
+  unsigned long currentTime = millis();
+  unsigned long deltaTime = currentTime - oldTime;
+  oldTime = currentTime;
+  return deltaTime;
+}
+
+void toneSpeaker() {
+  int potenciometer = analogRead(POTENCIOMETER);
+  if (potenciometer > 10)
+  {
+    tone(SPEAKER, analogRead(POTENCIOMETER));
+  }
+  else
+  {
+    noTone(SPEAKER);
+  }
+}
+//-----------------
+
+//-----------------
+// Setup application
+void setup()
+{
+  Oled.begin();
+  Oled.setFlipMode(true);
+
+  Wire.begin();
+  dht.begin();
+
+  pinMode(LIGHT_SENSOR, INPUT);
+  pinMode(BUTTON, INPUT);
+  pinMode(POTENCIOMETER, INPUT);
+  pinMode(LED, OUTPUT);
+  pinMode(SPEAKER, OUTPUT);
+}
+//-----------------
+
+//-----------------
+// Application loop
+void loop()
+{
+  digitalWrite(LED, LOW);
+
+  toneSpeaker();
+  checkButton();
+
+  delay(100);
+  Oled.setFont(u8x8_font_inb21_2x4_f);
+
+  unsigned long range = onState == light ? 900 : 2000;
+  if (timerCount >= range)
+  {
+    switch (onState)
+    {
+    case temperature:
+      printTemperature(getHdt());
+      break;
+    case humidity:
+      printHumidity(getHdt());
+      break;
+    case light:
+      printLight();
+      break;
+    default:
+      break;
+    }
+    timerCount = 0;
+  }
+
+  timerCount += getDeltatime();
+}
+//-----------------
